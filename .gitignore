@@ -1,0 +1,11 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+data/raw/
+data/processed/
+data/payloads/
+data/logs/
+data/qa/
+.DS_Store
+__MACOSX/
