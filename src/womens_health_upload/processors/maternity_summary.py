@@ -20,8 +20,14 @@ REPORT_2_OUTPUT_FILE = Path(
     "nhs-maternity-delivery-trends-summary-report-2.csv"
 )
 
+REPORT_3_OUTPUT_FILE = Path(
+    "data/processed/nhs_maternity/"
+    "nhs-maternity-delivery-trends-summary-report-3.csv"
+)
+
 REPORT_1_SHEET_NAME = "Summary report 1"
 REPORT_2_SHEET_NAME = "Summary report 2"
+REPORT_3_SHEET_NAME = "Summary report 3"
 
 EXPECTED_PERIODS = [
     "2014-15",
@@ -45,6 +51,11 @@ EXPECTED_AGE_GROUPS = [
     "40+ years",
 ]
 
+EXPECTED_METHODS_OF_ONSET = [
+    "Caesarean",
+    "Spontaneous",
+    "Induced",
+]
 
 def read_source_sheet(
     source_path: Path,
@@ -362,12 +373,166 @@ def process_summary_report_2(
 
     return result
 
+def process_summary_report_3(
+    source_path: Path = SOURCE_FILE,
+    output_path: Path = REPORT_3_OUTPUT_FILE,
+) -> pd.DataFrame:
+    """Extract percentages of known deliveries by method of onset."""
+
+    raw = read_source_sheet(
+        source_path,
+        REPORT_3_SHEET_NAME,
+    )
+
+    row_labels = (
+        raw.iloc[:, 0]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    header_rows = raw.index[
+        row_labels.eq("Method of Onset")
+    ].tolist()
+
+    if len(header_rows) != 1:
+        raise ValueError(
+            "Expected exactly one 'Method of Onset' header "
+            f"row in {REPORT_3_SHEET_NAME}; "
+            f"found {len(header_rows)}."
+        )
+
+    period_row = header_rows[0]
+
+    period_columns, periods = find_reporting_periods(
+        raw,
+        period_row,
+    )
+
+    values_by_method: dict[str, list[int]] = {}
+
+    for method in EXPECTED_METHODS_OF_ONSET:
+        matching_rows = raw.index[
+            row_labels.eq(method)
+        ].tolist()
+
+        if len(matching_rows) != 1:
+            raise ValueError(
+                f"Expected exactly one row for {method!r}; "
+                f"found {len(matching_rows)}."
+            )
+
+        values = pd.to_numeric(
+            raw.loc[
+                matching_rows[0],
+                period_columns,
+            ],
+            errors="raise",
+        )
+
+        if values.isna().any():
+            raise ValueError(
+                f"Missing percentage for {method!r}."
+            )
+
+        if ((values < 0) | (values > 100)).any():
+            raise ValueError(
+                f"Percentage outside 0–100 for {method!r}."
+            )
+
+        if ((values % 1) != 0).any():
+            raise ValueError(
+                f"Non-integer published percentage for {method!r}."
+            )
+
+        values_by_method[method] = (
+            values.astype("int64").tolist()
+        )
+
+    records: list[dict[str, object]] = []
+
+    for period_position, period in enumerate(periods):
+        for method in EXPECTED_METHODS_OF_ONSET:
+            records.append(
+                {
+                    "reporting_period": period,
+                    "method_of_onset": method,
+                    "percentage_of_known_deliveries": (
+                        values_by_method[method][
+                            period_position
+                        ]
+                    ),
+                    "denominator_scope": (
+                        "Deliveries with known method of onset"
+                    ),
+                    "geography": "England",
+                    "unit": "percent",
+                    "source": (
+                        "Hospital Episode Statistics (HES), "
+                        "NHS England"
+                    ),
+                    "source_release": (
+                        "NHS Maternity Statistics, 2024-25"
+                    ),
+                    "source_file": source_path.name,
+                    "source_sheet": REPORT_3_SHEET_NAME,
+                }
+            )
+
+    result = pd.DataFrame.from_records(records)
+
+    if len(result) != 33:
+        raise ValueError(
+            "Expected 33 Report 3 output rows; "
+            f"produced {len(result)}."
+        )
+
+    if result[
+        ["reporting_period", "method_of_onset"]
+    ].duplicated().any():
+        raise ValueError(
+            "Duplicate period and method-of-onset "
+            "combinations were produced."
+        )
+
+    observed_methods = set(
+        result["method_of_onset"].unique()
+    )
+
+    if observed_methods != set(EXPECTED_METHODS_OF_ONSET):
+        raise ValueError(
+            "Report 3 methods differ from the expected set."
+        )
+
+    percentage_totals = result.groupby(
+        "reporting_period",
+        sort=False,
+    )["percentage_of_known_deliveries"].sum()
+
+    invalid_totals = percentage_totals[
+        ~percentage_totals.between(99, 101)
+    ]
+
+    if not invalid_totals.empty:
+        raise ValueError(
+            "Method-of-onset percentages should total "
+            "approximately 100 after rounding. Invalid totals: "
+            f"{invalid_totals.to_dict()}"
+        )
+
+    write_processed_csv(
+        result,
+        output_path,
+    )
+
+    return result
 
 def main() -> None:
     """Process all implemented maternity summary reports."""
 
     process_summary_report_1()
     process_summary_report_2()
+    process_summary_report_3()
 
 
 if __name__ == "__main__":
