@@ -9,3 +9,8 @@ data/logs/
 data/qa/
 .DS_Store
 __MACOSX/
+/*.xlsx
+/*.xls
+/*.ods
+/*.pdf
+
