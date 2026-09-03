@@ -1,0 +1,2 @@
+resource_id,dataset_id,resource_name,description,format,local_path,source_sheet,measure_name,unit,upload_decision
+summary-report-1-delivery-counts,nhs-maternity-delivery-trends,"Annual number of deliveries, 2014-15 to 2024-25","Annual number of deliveries in NHS hospitals in England from Hospital Episode Statistics.",CSV,data/processed/nhs_maternity/nhs-maternity-delivery-trends-summary-report-1.csv,Summary report 1,Number of deliveries,count,upload
