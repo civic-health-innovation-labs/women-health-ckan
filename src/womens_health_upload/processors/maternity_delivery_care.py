@@ -20,8 +20,14 @@ REPORT_5_OUTPUT_FILE = Path(
     "nhs-maternity-delivery-care-summary-report-5.csv"
 )
 
+REPORT_6_OUTPUT_FILE = Path(
+    "data/processed/nhs_maternity/"
+    "nhs-maternity-delivery-care-summary-report-6.csv"
+)
+
 REPORT_4_SHEET_NAME = "Summary report 4"
 REPORT_5_SHEET_NAME = "Summary report 5"
+REPORT_6_SHEET_NAME = "Summary report 6"
 
 EXPECTED_PERIODS = [
     "2014-15",
@@ -40,6 +46,32 @@ EXPECTED_METHODS_OF_DELIVERY = [
     "Spontaneous",
     "Instrumental",
     "Caesarean",
+]
+
+EXPECTED_DELIVERY_COMPLICATIONS = [
+    (
+        "O70",
+        "Perineal laceration during delivery",
+    ),
+    (
+        "O36",
+        "Maternal care for other known or suspected fetal problems",
+    ),
+    (
+        "O99",
+        (
+            "Other maternal diseases classifiable elsewhere but "
+            "complicating pregnancy, childbirth and the puerperium"
+        ),
+    ),
+    (
+        "O68",
+        "Labour and delivery complicated by fetal stress [distress]",
+    ),
+    (
+        "O72",
+        "Postpartum haemorrhage",
+    ),
 ]
 
 def read_source_sheet(
@@ -487,11 +519,189 @@ def process_summary_report_5(
 
     return result
 
+def process_summary_report_6(
+    source_path: Path = SOURCE_FILE,
+    output_path: Path = REPORT_6_OUTPUT_FILE,
+) -> pd.DataFrame:
+    """Extract the five (total) most prevalent delivery complications."""
+
+    raw = read_source_sheet(
+        source_path,
+        REPORT_6_SHEET_NAME,
+    )
+
+    row_labels = (
+        raw.iloc[:, 0]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    header_rows = raw.index[
+        row_labels.eq("Complication (ICD-10 code)")
+    ].tolist()
+
+    if len(header_rows) != 1:
+        raise ValueError(
+            "Expected exactly one complication header row in "
+            f"{REPORT_6_SHEET_NAME}; found {len(header_rows)}."
+        )
+
+    header_values = (
+        raw.loc[header_rows[0]]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    description_columns = header_values.index[
+        header_values.eq("Complication description")
+    ].tolist()
+
+    percentage_columns = header_values.index[
+        header_values.eq("Percentage")
+    ].tolist()
+
+    if len(description_columns) != 1:
+        raise ValueError(
+            "Expected exactly one complication-description "
+            f"column; found {len(description_columns)}."
+        )
+
+    if len(percentage_columns) != 1:
+        raise ValueError(
+            "Expected exactly one percentage column; "
+            f"found {len(percentage_columns)}."
+        )
+
+    description_column = description_columns[0]
+    percentage_column = percentage_columns[0]
+
+    records: list[dict[str, object]] = []
+
+    for source_order, (
+        expected_code,
+        expected_description,
+    ) in enumerate(
+        EXPECTED_DELIVERY_COMPLICATIONS,
+        start=1,
+    ):
+        matching_rows = raw.index[
+            row_labels.eq(expected_code)
+        ].tolist()
+
+        if len(matching_rows) != 1:
+            raise ValueError(
+                f"Expected one row for ICD-10 code "
+                f"{expected_code!r}; found {len(matching_rows)}."
+            )
+
+        source_row = matching_rows[0]
+
+        observed_description = str(
+            raw.at[source_row, description_column]
+        ).strip()
+
+        if observed_description != expected_description:
+            raise ValueError(
+                f"Description for {expected_code} differs "
+                "from the expected ICD-10 description. "
+                f"Found: {observed_description!r}"
+            )
+
+        percentage = pd.to_numeric(
+            raw.at[source_row, percentage_column],
+            errors="raise",
+        )
+
+        if pd.isna(percentage):
+            raise ValueError(
+                f"Missing percentage for {expected_code}."
+            )
+
+        if percentage < 0 or percentage > 100:
+            raise ValueError(
+                f"Percentage outside 0–100 for {expected_code}."
+            )
+
+        if percentage % 1 != 0:
+            raise ValueError(
+                "Expected a whole published percentage for "
+                f"{expected_code}; found {percentage}."
+            )
+
+        records.append(
+            {
+                "reporting_period": "2024-25",
+                "source_order": source_order,
+                "complication_icd10_code": expected_code,
+                "complication_description": (
+                    expected_description
+                ),
+                "percentage_of_delivery_episodes": int(
+                    percentage
+                ),
+                "denominator_scope": (
+                    "All finished delivery episodes in England"
+                ),
+                "overlap_note": (
+                    "A delivery episode may have no recorded "
+                    "complication or more than one complication; "
+                    "percentages must not be summed."
+                ),
+                "source_context_note": (
+                    "Complications from earlier in pregnancy "
+                    "may be recorded when relevant to care "
+                    "during the delivery episode."
+                ),
+                "geography": "England",
+                "unit": "percent",
+                "source": (
+                    "Hospital Episode Statistics (HES), "
+                    "NHS England"
+                ),
+                "source_release": (
+                    "NHS Maternity Statistics, 2024-25"
+                ),
+                "source_file": source_path.name,
+                "source_sheet": REPORT_6_SHEET_NAME,
+            }
+        )
+
+    result = pd.DataFrame.from_records(records)
+
+    if len(result) != 5:
+        raise ValueError(
+            "Expected five Report 6 output rows; "
+            f"produced {len(result)}."
+        )
+
+    if result["complication_icd10_code"].duplicated().any():
+        raise ValueError(
+            "Duplicate ICD-10 complication codes were produced."
+        )
+
+    if not result[
+        "percentage_of_delivery_episodes"
+    ].is_monotonic_decreasing:
+        raise ValueError(
+            "Report 6 complication percentages are not in "
+            "non-increasing prevalence order."
+        )
+
+    write_processed_csv(
+        result,
+        output_path,
+    )
+
+    return result
+
 def main() -> None:
     """Process all implemented delivery-care reports."""
 
     process_summary_report_4()
     process_summary_report_5()
+    process_summary_report_6()
 
 
 if __name__ == "__main__":
