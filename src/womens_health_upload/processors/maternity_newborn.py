@@ -38,6 +38,18 @@ APGAR_SCORE_GROUPS = [
     ("7 to 10", 7, 10),
 ]
 
+REPORT_10_OUTPUT_FILE = Path(
+    "data/processed/nhs_maternity/"
+    "nhs-maternity-newborn-characteristics-summary-report-10.csv"
+)
+
+REPORT_10_SHEET_NAME = "Summary report 10"
+
+SKIN_TO_SKIN_STATUSES = [
+    ("Skin-to-skin contact", True),
+    ("No skin-to-skin contact", False),
+]
+
 def process_summary_report_8(
     source_path: Path = SOURCE_FILE,
     output_path: Path = REPORT_8_OUTPUT_FILE,
@@ -439,11 +451,274 @@ def process_summary_report_9(
 
     return result
 
+def process_summary_report_10(
+    source_path: Path = SOURCE_FILE,
+    output_path: Path = REPORT_10_OUTPUT_FILE,
+) -> pd.DataFrame:
+    """Extract and validate skin-to-skin contact statistics."""
+
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            f"Source workbook was not found: {source_path}"
+        )
+
+    warnings.filterwarnings(
+        "ignore",
+        message="Cannot parse header or footer",
+        category=UserWarning,
+    )
+
+    raw = pd.read_excel(
+        source_path,
+        sheet_name=REPORT_10_SHEET_NAME,
+        header=None,
+    )
+
+    normalized = raw.apply(
+        lambda column: column.fillna("").astype(str).str.strip()
+    )
+
+    header_rows = normalized.index[
+        normalized.eq("Skin-to-skin contact status").any(axis=1)
+    ].tolist()
+
+    if len(header_rows) != 1:
+        raise ValueError(
+            "Expected exactly one skin-to-skin contact header row in "
+            f"{REPORT_10_SHEET_NAME}; found {len(header_rows)}."
+        )
+
+    header_row = header_rows[0]
+
+    status_columns = normalized.columns[
+        normalized.loc[header_row].eq(
+            "Skin-to-skin contact status"
+        )
+    ].tolist()
+
+    number_columns = normalized.columns[
+        normalized.loc[header_row].eq("Number of babies")
+    ].tolist()
+
+    percentage_columns = [
+        column
+        for column in normalized.columns
+        if normalized.at[header_row, column].startswith("Per cent")
+    ]
+
+    if (
+        len(status_columns) != 1
+        or len(number_columns) != 1
+        or len(percentage_columns) != 1
+    ):
+        raise ValueError(
+            "Could not identify the skin-to-skin status, count and "
+            "percentage columns uniquely."
+        )
+
+    status_column = status_columns[0]
+    number_column = number_columns[0]
+    percentage_column = percentage_columns[0]
+
+    expected_labels = [
+        status[0] for status in SKIN_TO_SKIN_STATUSES
+    ]
+    status_rows = {}
+
+    for label in expected_labels:
+        rows = normalized.index[
+            normalized[status_column].eq(label)
+        ].tolist()
+
+        if len(rows) != 1:
+            raise ValueError(
+                "Expected exactly one row for skin-to-skin status "
+                f"'{label}'; found {len(rows)}."
+            )
+
+        status_rows[label] = rows[0]
+
+    missing_rows = normalized.index[
+        normalized[status_column].str.startswith(
+            "Missing Value / Value outside reporting parameters"
+        )
+    ].tolist()
+
+    total_rows = normalized.index[
+        normalized[status_column].eq("Total")
+    ].tolist()
+
+    if len(missing_rows) != 1 or len(total_rows) != 1:
+        raise ValueError(
+            "Expected exactly one missing/invalid row and one total row."
+        )
+
+    counts = [
+        pd.to_numeric(
+            raw.at[status_rows[label], number_column],
+            errors="raise",
+        )
+        for label in expected_labels
+    ]
+
+    proportions = [
+        pd.to_numeric(
+            raw.at[status_rows[label], percentage_column],
+            errors="raise",
+        )
+        for label in expected_labels
+    ]
+
+    missing_count = pd.to_numeric(
+        raw.at[missing_rows[0], number_column],
+        errors="raise",
+    )
+
+    total_count = pd.to_numeric(
+        raw.at[total_rows[0], number_column],
+        errors="raise",
+    )
+
+    all_counts = [*counts, missing_count, total_count]
+
+    if any(pd.isna(value) for value in all_counts):
+        raise ValueError(
+            "One or more skin-to-skin contact counts are missing."
+        )
+
+    if any(value < 0 or value % 1 != 0 for value in all_counts):
+        raise ValueError(
+            "Skin-to-skin contact counts must be non-negative "
+            "whole numbers."
+        )
+
+    if any(pd.isna(value) for value in proportions):
+        raise ValueError(
+            "One or more valid-status proportions are missing."
+        )
+
+    if any(value < 0 or value > 1 for value in proportions):
+        raise ValueError(
+            "Skin-to-skin contact proportions must be between "
+            "zero and one."
+        )
+
+    if abs(sum(proportions) - 1) > 0.001:
+        raise ValueError(
+            "Valid skin-to-skin contact proportions do not total one."
+        )
+
+    valid_count = int(sum(counts))
+    missing_count = int(missing_count)
+    total_count = int(total_count)
+
+    if valid_count + missing_count != total_count:
+        raise ValueError(
+            "Valid and missing/invalid skin-to-skin counts do not "
+            f"reconcile to the total: {valid_count} + "
+            f"{missing_count} != {total_count}."
+        )
+
+    records = []
+
+    for order, (
+        (label, had_contact),
+        count,
+        proportion,
+    ) in enumerate(
+        zip(
+            SKIN_TO_SKIN_STATUSES,
+            counts,
+            proportions,
+            strict=True,
+        ),
+        start=1,
+    ):
+        records.append(
+            {
+                "reporting_period": "2024-25",
+                "skin_to_skin_contact_status": label,
+                "skin_to_skin_contact_status_order": order,
+                "had_skin_to_skin_contact": had_contact,
+                "number_of_babies": int(count),
+                "percentage_of_babies_with_valid_contact_status": round(
+                    float(proportion) * 100,
+                    1,
+                ),
+                "total_term_babies": total_count,
+                "valid_skin_to_skin_contact_status_babies": valid_count,
+                "missing_or_invalid_contact_status_babies": (
+                    missing_count
+                ),
+                "contact_definition": (
+                    "The baby had skin-to-skin contact with their "
+                    "mother within one hour of birth."
+                ),
+                "population_scope": (
+                    "Distinct term babies with gestation length "
+                    "between 259 and 315 days."
+                ),
+                "percentage_denominator": (
+                    "Term babies with a valid skin-to-skin contact "
+                    "status."
+                ),
+                "rounding_note": (
+                    "Baby counts are rounded to the nearest 5. Counts "
+                    "between 1 and 7 are rounded to 5. Percentages are "
+                    "calculated from rounded counts."
+                ),
+                "geography": "England",
+                "count_unit": "babies",
+                "percentage_unit": "percent",
+                "source": (
+                    "Maternity Services Data Set (MSDS), NHS England"
+                ),
+                "source_release": (
+                    "NHS Maternity Statistics, 2024-25"
+                ),
+                "source_file": source_path.name,
+                "source_sheet": REPORT_10_SHEET_NAME,
+            }
+        )
+
+    result = pd.DataFrame.from_records(records)
+
+    if len(result) != 2:
+        raise ValueError(
+            f"Expected 2 output rows; produced {len(result)}."
+        )
+
+    if result["skin_to_skin_contact_status"].duplicated().any():
+        raise ValueError(
+            "Duplicate skin-to-skin contact statuses were produced."
+        )
+
+    percentage_total = result[
+        "percentage_of_babies_with_valid_contact_status"
+    ].sum()
+
+    if abs(percentage_total - 100) > 0.1:
+        raise ValueError(
+            "Valid skin-to-skin contact percentages should total "
+            f"100; found {percentage_total}."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_suffix(".tmp")
+    result.to_csv(temporary_path, index=False)
+    temporary_path.replace(output_path)
+
+    print(f"Created: {output_path}")
+    print(f"Rows: {len(result)}")
+
+    return result
+
 def main() -> None:
     """Process all implemented newborn summary reports."""
 
     process_summary_report_8()
     process_summary_report_9()
+    process_summary_report_10()
 
 
 if __name__ == "__main__":
